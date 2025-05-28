@@ -17,30 +17,16 @@
 
 let log s = Format.fprintf Format.std_formatter "lspManager: %s\n" s
 
-let counter = ref 0
+let receive_raw_request () = Sel.On.httpcle ~priority:1 ~name:"lsp" Unix.stdin
+
+let send_rpc_request () = ()
+
 
 module type Manager = sig
   type event
   val init : unit -> event Sel.Event.t list
   val handle_event : event -> event Sel.Event.t list
   val print_event : Format.formatter -> event -> unit
-end
-
-module DummyManager:Manager = struct 
-  type event =
-  | Increment
-  | Decrement
-
-  let init () = [(Sel.now ~priority:(-1) Increment); (Sel.now ~priority:(-1) Increment)]
-
-  let handle_event = function
-    | Increment -> counter := !counter + 1;[]
-    | Decrement -> counter := !counter - 1;[]
-
-  let print_event fmt ev =
-    match ev with
-      | Increment -> Format.fprintf fmt "Increment,%d" !counter
-      | Decrement -> Format.fprintf fmt "Decrement,%d" !counter
 end
 
 module LspManager : Manager = struct
@@ -66,12 +52,12 @@ module LspManager : Manager = struct
     )]
   let print_event _fmt = function
     | Receive _ -> log "Receive event"
-    | Send _ -> log "Send event"    
+    | Send _ -> log "Send event"
 
-  let handle_event e= 
+  let handle_event e=
     match e with
     | _ -> print_event Format.std_formatter e; []
-  
+
 end
 
 module Make(Manager:Manager) = struct
