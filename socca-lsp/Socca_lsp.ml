@@ -25,12 +25,131 @@ module type Manager = sig
   val print_event : Format.formatter -> event -> unit
 end
 
-module LspManager : Manager = struct
-  type event =
-    | Receive of Jsonrpc.Packet.t option
-    | Send of Jsonrpc.Packet.t
 
-  let handle_raw_request = function
+type event =
+  | Receive of Jsonrpc.Packet.t option
+  | Send of Jsonrpc.Packet.t
+
+module type EventCaster = sig
+  type event
+
+  val cast_event : Jsonrpc.Packet.t -> event list
+end
+
+
+let server_info = Lsp.Types.InitializeResult.create_serverInfo
+  ~name:"socca-lsp"
+  ~version:"0.0.1"
+  ()
+
+let conf_request_id = max_int
+
+
+let send_configuration_request () =
+  let id = `Int conf_request_id in
+  let mk_configuration_item section =
+    Lsp.Types.ConfigurationItem.({ scopeUri = None; section = Some section })
+  in
+  let items = List.map mk_configuration_item ["vsrocq"] in
+  let req = Lsp.Server_request.(to_jsonrpc_request (WorkspaceConfiguration { items }) ~id) in
+  Send (Request req)
+
+type error = {
+  code : Jsonrpc.Response.Error.Code.t option;
+  message : string;
+}
+
+
+
+module LspManager = struct
+
+
+  let initialize id params =
+    log_file "We have done something" "/home/bourbeillon/test.log";
+    let Lsp.Types.InitializeParams.{ initializationOptions } = params in
+    begin match initializationOptions with
+    | None -> log_file "Warning : initialize request empty" "/home/bourbeillon/test.log"
+    | Some initializationOptions -> ()
+    end;
+    let textDocumentSync = `TextDocumentSyncKind Lsp.Types.TextDocumentSyncKind.Incremental in
+    let capabilities = Lsp.Types.ServerCapabilities.create ~textDocumentSync ()
+    in
+    let initialize_result = Lsp.Types.InitializeResult.{
+      capabilities = capabilities;
+      serverInfo = Some server_info;
+    } in
+    (* let debug_events = Common.Log.lsp_initialization_done () |> inject_debug_events in *)
+    Ok initialize_result, [Sel.now @@ (send_configuration_request ())]
+    (* debug_events@[Sel.now @@ LspManagerEvent (send_configuration_request ())] *)
+
+  let shutdown id =
+    Ok(()), []
+
+  let handle_lsp_request : type a. Jsonrpc.Id.t -> a Lsp.Client_request.t -> (a, error) result * event Sel.Event.t list = fun
+  id req ->
+  match req with
+    | Initialize params ->
+      initialize id params
+    | Shutdown ->
+      shutdown id
+    | TextDocumentDefinition _ ->
+      Ok None, []
+    | TextDocumentHover _ ->
+      Ok None, []
+    | DocumentSymbol _ ->
+      Ok None, []
+    | UnknownRequest _ ->
+       Error({message = "Unknown request"; code=None}), []
+    | _ ->
+      Error({message = "Not handled request"; code=None}), []
+
+  let unpack_rpc_request (req: Jsonrpc.Request.t) : event Sel.Event.t list =
+    let id = req.id in
+    let req = Lsp.Client_request.of_jsonrpc (req) in
+    match req with
+    | Error e -> log ("Failed to handle request: " ^ e); []
+    | Ok (Lsp.Client_request.E req) ->
+        let response,events = handle_lsp_request id req in
+        begin
+        match response with
+        | Error {code; message} -> ()
+        | Ok resp ->
+          let response = Lsp.Client_request.yojson_of_result req resp in
+          ignore (Channel.send_rpc_request Channel.std_channel response)
+        end;
+        events
+end
+
+
+module BaseEventCaster = struct
+
+  type event =
+  | LspEvent of Lsp.Client_request.packed
+
+  let cast_request (req:Jsonrpc.Request.t) = LspManager.unpack_rpc_request req
+
+  let cast_notification (notif:Jsonrpc.Notification.t) = []
+
+  let cast_response (resp:Jsonrpc.Response.t) = []
+
+  let cast_batch_response (batch_resp:Jsonrpc.Response.t list) =
+    List.concat (List.map cast_response batch_resp)
+
+  let cast_batch_call (batch_call:[ `Request of Jsonrpc.Request.t | `Notification of Jsonrpc.Notification.t ] list) = []
+
+  let cast_event (pkt:Jsonrpc.Packet.t) =
+    match pkt with
+    | Request req -> cast_request req
+    | Notification notif -> cast_notification notif
+    | Response resp -> cast_response resp
+    | Batch_response batch_resp -> cast_batch_response batch_resp
+    | Batch_call batch_call -> cast_batch_call batch_call
+
+end
+
+module ProtocolManager = struct
+
+  let handle_raw_receive_request = function
   | Ok raw ->
     begin
     match Channel.raw_to_rpc (Bytes.to_string raw) with
@@ -44,73 +163,42 @@ module LspManager : Manager = struct
     (* do not remove this line otherwise the server stays running in some scenarios *)
     exit 0
 
-  let init () =
-    let events = Channel.receive_raw_request Channel.std_channel handle_raw_request in
+  let await_events () =
+    Logger.log_file "TEST\n" "/home/bourbeillon/test.log";
+    let events = Channel.receive_raw_request Channel.std_channel handle_raw_receive_request in
     [events]
 
   let print_event _fmt = function
     | Receive _ -> log "Receive event"
     | Send _ -> log "Send event"
 
-  let handle_event e=
+  let handle_event e =
     match e with
-    | _ -> print_event Format.std_formatter e; []
-
+    | Receive None -> await_events ()
+    | Receive (Some pkt) -> await_events() @ BaseEventCaster.cast_event pkt (* TODO : handle request, transform this module to a functor*)
+    | Send pkt ->
+      let _ = Channel.send_rpc_request Channel.std_channel (Jsonrpc.Packet.yojson_of_t pkt) in (*We could use ignore, this function return int because of exit code*)
+      await_events ()
 end
 
-module Make(Manager:Manager) = struct
 let loop () =
-  let events = Manager.init () in
-  let rec loop (todo : Manager.event Sel.Todo.t) =
+  let events = ProtocolManager.await_events () in
+  let rec loop (todo : event Sel.Todo.t) =
     (*log fun () -> "looking for next step";*)
     flush_all ();
     let ready, todo = Sel.pop todo in
-    let nremaining = Sel.Todo.size todo in
-    log (Format.asprintf "Main loop event ready: %a, %d events waiting\n\n" Manager.print_event ready nremaining);
-    log ("==========================================================");
-    log (Format.asprintf "Todo events: %a" (Sel.Todo.pp Manager.print_event) todo);
-    log ("==========================================================\n\n");
-    let new_events = Manager.handle_event ready in
+    log_file "Oui" "/home/bourbeillon/test.log";
+    let new_events = ProtocolManager.handle_event ready in
     let todo = Sel.Todo.add todo new_events in
-    log ("==========================================================");
-    log (Format.asprintf "New Todo events: %a" (Sel.Todo.pp Manager.print_event) todo);
-    log ("==========================================================\n\n");
+    log_file "Oui" "/home/bourbeillon/test.log";
     loop todo
   in
   let todo = Sel.Todo.add Sel.Todo.empty events in
   try loop todo
   with exn ->
-    log "Exception raised."
-end
+    log_file "Exception raised." "/home/bourbeillon/test.log"
 
-module LspLoop = Make(LspManager)
 
 let () =
   log "Starting the main loop.";
-  LspLoop.loop()
-
-
-(* [%%if rocq = "8.18" || rocq = "8.19" || rocq = "8.20"]
-let _ =
-  Coqinit.init_ocaml ();
-  log (fun () -> "------------------ begin ---------------");
-  let cwd = Unix.getcwd () in
-  let opts = Args.get_local_args  cwd in
-  let _injections = Coqinit.init_runtime opts in
-  Safe_typing.allow_delayed_constants := true; (* Needed to delegate or skip proofs *)
-  Flags.load_vos_libraries := true;
-  Sys.(set_signal sigint Signal_ignore);
-  loop ()
-[%%else]
-
-let () =
-  Coqinit.init_ocaml ();
-  log (fun () -> "------------------ begin ---------------");
-  let cwd = Unix.getcwd () in
-  let opts = Args.get_local_args cwd in
-  let () = Coqinit.init_runtime ~usage:(Args.usage ()) opts in
-  Safe_typing.allow_delayed_constants := true; (* Needed to delegate or skip proofs *)
-  Flags.load_vos_libraries := true;
-  Sys.(set_signal sigint Signal_ignore);
-  loop ()
-[%%endif] *)
+  loop()
