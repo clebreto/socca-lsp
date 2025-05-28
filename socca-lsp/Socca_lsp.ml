@@ -15,11 +15,7 @@
 (** This toplevel implements an LSP-based server language for VsCode,
     used by the VsRocq extension. *)
 
-let log s = Format.fprintf Format.std_formatter "lspManager: %s\n" s
-
-let receive_raw_request () = Sel.On.httpcle ~priority:1 ~name:"lsp" Unix.stdin
-
-let send_rpc_request () = ()
+open Logger
 
 
 module type Manager = sig
@@ -34,22 +30,24 @@ module LspManager : Manager = struct
     | Receive of Jsonrpc.Packet.t option
     | Send of Jsonrpc.Packet.t
 
+  let handle_raw_request = function
+  | Ok raw ->
+    begin
+    match Channel.raw_to_rpc (Bytes.to_string raw) with
+    | Some pkt -> Receive (Some pkt)
+    | None ->
+      log "Failed to decode JSON request";
+      Receive None
+    end
+  | Error exn ->
+    log ("Failed to read message: " ^ Printexc.to_string exn);
+    (* do not remove this line otherwise the server stays running in some scenarios *)
+    exit 0
+
   let init () =
-    [Sel.On.httpcle ~priority:1 ~name:"lsp" Unix.stdin (function
-      | Ok buff ->
-        log ("UI req ready");
-        (try
-           let json = Yojson.Safe.from_string (Bytes.to_string buff) in
-           let pkt = Jsonrpc.Packet.t_of_yojson json in
-           (Receive (Some pkt))
-         with _exn ->
-           log ("failed to decode json");
-           (Receive None))
-      | Error exn ->
-        log ("failed to read message: " ^ Printexc.to_string exn);
-        (* do not remove this line otherwise the server stays running in some scenarios *)
-        exit 0
-    )]
+    let events = Channel.receive_raw_request Channel.std_channel handle_raw_request in
+    [events]
+
   let print_event _fmt = function
     | Receive _ -> log "Receive event"
     | Send _ -> log "Send event"
@@ -82,12 +80,12 @@ let loop () =
   let todo = Sel.Todo.add Sel.Todo.empty events in
   try loop todo
   with exn ->
-    log "Exception raised."    
+    log "Exception raised."
 end
 
 module LspLoop = Make(LspManager)
 
-let () = 
+let () =
   log "Starting the main loop.";
   LspLoop.loop()
 
