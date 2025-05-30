@@ -1,3 +1,4 @@
+open Logger
 
 type t = {
   in_channel : Unix.file_descr;
@@ -9,7 +10,7 @@ let std_channel : t = {
   out_channel = Unix.stdout;
 }
 
-let receive_raw_request t = Sel.On.httpcle ~priority:1 ~name:"lsp" t.in_channel
+let receive_raw_request t = log_file "receive_raw_request\n" log_filepath; Sel.On.httpcle ~priority:(-6) ~name:"lsp" t.in_channel
 
 let send_raw_request t str =
   try
@@ -24,14 +25,17 @@ let send_raw_request t str =
 
 
 let raw_to_rpc raw =
+  log_file raw log_filepath;
+  log_file "raw_to_rpc\n" log_filepath;
   try
     let json = Yojson.Safe.from_string raw in
-    Some (Jsonrpc.Packet.t_of_yojson json)
+    log_file "Jsonrpc packet received\n" log_filepath; Some (Jsonrpc.Packet.t_of_yojson json)
   with
   | Yojson.Json_error _ ->
+     log_file "Json_error\n" log_filepath;
       None
   | exn ->
-      Printf.eprintf "Error decoding JSON: %s\n" (Printexc.to_string exn);
+    log_file "Error decoding JSON\n" log_filepath;
       None
 
 let send_rpc_request t json =

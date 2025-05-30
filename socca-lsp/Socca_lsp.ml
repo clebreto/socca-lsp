@@ -17,7 +17,6 @@
 
 open Logger
 
-
 module type Manager = sig
   type event
   val init : unit -> event Sel.Event.t list
@@ -44,7 +43,6 @@ let server_info = Lsp.Types.InitializeResult.create_serverInfo
 
 let conf_request_id = max_int
 
-
 let send_configuration_request () =
   let id = `Int conf_request_id in
   let mk_configuration_item section =
@@ -59,16 +57,12 @@ type error = {
   message : string;
 }
 
-
-
 module LspManager = struct
-
-
-  let initialize id params =
-    log_file "We have done something" "/home/bourbeillon/test.log";
+  let initialize _id params =
+    log_file "We have done something" log_filepath;
     let Lsp.Types.InitializeParams.{ initializationOptions } = params in
     begin match initializationOptions with
-    | None -> log_file "Warning : initialize request empty" "/home/bourbeillon/test.log"
+    | None -> log_file "Warning : initialize request empty" log_filepath
     | Some initializationOptions -> ()
     end;
     let textDocumentSync = `TextDocumentSyncKind Lsp.Types.TextDocumentSyncKind.Incremental in
@@ -144,7 +138,6 @@ module BaseEventCaster = struct
     | Response resp -> cast_response resp
     | Batch_response batch_resp -> cast_batch_response batch_resp
     | Batch_call batch_call -> cast_batch_call batch_call
-
 end
 
 module ProtocolManager = struct
@@ -153,19 +146,21 @@ module ProtocolManager = struct
   | Ok raw ->
     begin
     match Channel.raw_to_rpc (Bytes.to_string raw) with
-    | Some pkt -> Receive (Some pkt)
+    | Some pkt -> log_file "Some pkt\n" log_filepath;
+    Receive (Some pkt)
     | None ->
-      log "Failed to decode JSON request";
+      log_file "Failed to decode JSON request" log_filepath;
       Receive None
     end
   | Error exn ->
-    log ("Failed to read message: " ^ Printexc.to_string exn);
+    log_file ("Failed to read message: " ^ Printexc.to_string exn) log_filepath;
     (* do not remove this line otherwise the server stays running in some scenarios *)
     exit 0
 
   let await_events () =
-    Logger.log_file "TEST\n" "/home/bourbeillon/test.log";
+    log_file "await_events\n" log_filepath;
     let events = Channel.receive_raw_request Channel.std_channel handle_raw_receive_request in
+    log_file "after receive request" log_filepath;
     [events]
 
   let print_event _fmt = function
@@ -174,31 +169,29 @@ module ProtocolManager = struct
 
   let handle_event e =
     match e with
-    | Receive None -> await_events ()
-    | Receive (Some pkt) -> await_events() @ BaseEventCaster.cast_event pkt (* TODO : handle request, transform this module to a functor*)
+    | Receive None -> log_file "Receive None" log_filepath; await_events ()
+    | Receive (Some pkt) -> log_file "Receive (Some pkt)" log_filepath; await_events() @ BaseEventCaster.cast_event pkt (* TODO : handle request, transform this module to a functor*)
     | Send pkt ->
       let _ = Channel.send_rpc_request Channel.std_channel (Jsonrpc.Packet.yojson_of_t pkt) in (*We could use ignore, this function return int because of exit code*)
       await_events ()
 end
 
 let loop () =
-  let events = ProtocolManager.await_events () in
   let rec loop (todo : event Sel.Todo.t) =
-    (*log fun () -> "looking for next step";*)
-    flush_all ();
-    let ready, todo = Sel.pop todo in
-    log_file "Oui" "/home/bourbeillon/test.log";
-    let new_events = ProtocolManager.handle_event ready in
-    let todo = Sel.Todo.add todo new_events in
-    log_file "Oui" "/home/bourbeillon/test.log";
+    flush_all();
+    log_file "before Sel.pop" log_filepath;
+    let ready, todo = Sel.pop todo in  
+      let new_events = ProtocolManager.handle_event ready in
+          let todo = Sel.Todo.add todo new_events in
     loop todo
   in
-  let todo = Sel.Todo.add Sel.Todo.empty events in
+  let todo = Sel.Todo.add Sel.Todo.empty (ProtocolManager.await_events ()) in
   try loop todo
-  with exn ->
-    log_file "Exception raised." "/home/bourbeillon/test.log"
+  with _exn ->
+    log_file "Exception raised." log_filepath
 
 
-let () =
-  log "Starting the main loop.";
+let () =  
+  log_file "Starting Socca-lsp" log_filepath;
+  Sys.(set_signal sigint Signal_ignore);
   loop()
